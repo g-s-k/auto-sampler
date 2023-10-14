@@ -1,0 +1,15 @@
+[package]
+name = "autosam"
+version = "0.1.0"
+description = "A toolkit for automated multi-sampling of MIDI instruments"
+categories = ["multimedia::audio", "no-std"]
+
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+std = []

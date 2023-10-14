@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+  "autosam",
+  "multirec",
+]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+authors = ["George Kaplan"]
+repository = "https://github.com/g-s-k/auto-sampler"
+keywords = ["midi", "recording", "sampling", "sampler"]
+edition = "2021"
+rust-version = "1.71.1"

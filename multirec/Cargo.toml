@@ -1,0 +1,25 @@
+[package]
+name = "multirec"
+version = "0.1.0"
+description = "A command-line tool for automated multi-sampling of MIDI instruments"
+categories = ["command-line-utilities", "multimedia::audio"]
+
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0.75"
+clap = { version = "4.4.2", features = ["derive"] }
+cpal = "0.15.2"
+env_logger = "0.10.0"
+hound = "3.5.0"
+log = "0.4.20"
+midir = "0.9.1"
+rtrb = "0.2.3"
+thiserror = "1.0.48"
+
+autosam = { path = "../autosam", features = ["std"] }
