@@ -22,4 +22,4 @@ midir = "0.9.1"
 rtrb = "0.2.3"
 thiserror = "1.0.48"
 
-autosam = { path = "../autosam", features = ["std"] }
+autosam = { path = "../autosam", version = "0.1.0", features = ["std"] }
