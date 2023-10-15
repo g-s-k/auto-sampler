@@ -1,0 +1,15 @@
+<multisample name="1980s FM Synth">
+  <generator>multirec</generator>
+  <category>Pad</category>
+  <description>Very large plastic synthesizer playing a pad sound</description>
+  <keywords>
+    <keyword>Pad</keyword>
+    <keyword>Synth</keyword>
+    <keyword>Glassy</keyword>
+    <keyword>Retro</keyword>
+  </keywords>
+  <sample file="C2.wav"/>
+  <sample file="F2.wav"/>
+  <sample file="A#2.wav"/>
+  <sample file="D#3.wav"/>
+</multisample>
