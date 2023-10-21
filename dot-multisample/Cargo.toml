@@ -1,0 +1,20 @@
+[package]
+name = "dot-multisample"
+version = "0.1.0"
+description = "Bindings to the .multisample manifest file format"
+categories = ["multimedia::audio", "api-bindings"]
+
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1.0.189", features = ["derive"] }
+
+[dev-dependencies]
+quick-xml = { version = "0.30.0", features = ["serialize"] }
+tempfile = "3.8.0"
+zip = { version = "0.6.6", default-features = false }

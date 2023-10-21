@@ -23,14 +23,8 @@ pub struct Args {
     /// Select a MIDI channel to send on
     #[arg(long, short = 'c', default_value_t = ONE)]
     pub midi_channel: NonZeroU8,
-    /// Directory to save recordings in [default: current]
-    #[arg(long, short = 'o')]
-    pub output_directory: Option<PathBuf>,
-    /// Prefix for file names
-    #[arg(long, short = 'f')]
-    pub file_prefix: Option<String>,
     /// Specify verbosity of log messages
-    #[arg(long, default_value = "info")]
+    #[arg(long, default_value = "warn")]
     pub min_log_level: log::LevelFilter,
 }
 
@@ -41,6 +35,15 @@ pub enum Command {
     Show(Show),
     /// Run the auto-sampling routine
     Run {
+        /// Multi-sample package format to generate
+        #[arg(long, short = 'f', default_value = "raw")]
+        format: OutputFormat,
+        /// Directory to save recordings in [default: current]
+        #[arg(long, short = 'o')]
+        output_directory: Option<PathBuf>,
+        /// Prefix for file names
+        #[arg(long, short = 'p')]
+        file_prefix: Option<String>,
         /// Print configuration and exit
         #[clap(long, short = 'n')]
         dry_run: bool,
@@ -65,6 +68,7 @@ pub enum Command {
         #[clap(flatten)]
         timing: Timing,
     },
+    /// Play a single note to check routing configuration
     Test {
         /// Print configuration and exit
         #[clap(long, short = 'n')]
@@ -95,4 +99,11 @@ pub struct Timing {
     /// Time to wait after NoteOff before starting next note, in seconds
     #[arg(long, default_value_t = 0.5)]
     pub release: f64,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+pub enum OutputFormat {
+    Raw,
+    Zip,
+    Bitwig,
 }

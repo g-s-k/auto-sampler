@@ -1,5 +1,4 @@
 use std::{
-    fmt::Write,
     num::NonZeroU8,
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
@@ -10,6 +9,7 @@ use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, info, warn};
 use midir::MidiOutput;
+use serde::Serialize;
 
 use autosam::{
     midi::{Channel, Note, NoteState, Pitch},
@@ -59,6 +59,9 @@ fn run(args: Args) -> anyhow::Result<()> {
 
     let midi_output = MidiOutput::new("MIDI Output")?;
 
+    let mut output_dir = std::env::current_dir()?;
+    let mut file_name_prefix = None;
+    let mut output_format = arguments::OutputFormat::Raw;
     let is_dry_run;
     let config;
     let should_save;
@@ -105,10 +108,19 @@ fn run(args: Args) -> anyhow::Result<()> {
             round_robins,
             trim_start,
             timing,
+            output_directory,
+            file_prefix,
+            format,
         } => {
             is_dry_run = dry_run;
             let length = Duration::from_secs_f64(timing.sustain);
             let gap = Duration::from_secs_f64(timing.release);
+
+            output_format = format;
+            file_name_prefix = file_prefix;
+            if let Some(d) = output_directory {
+                output_dir = d;
+            }
 
             info!(
                 "Recording every {} from {start} until {end} \
@@ -204,253 +216,249 @@ fn run(args: Args) -> anyhow::Result<()> {
     }
 
     let (note_tx, mut note_rx) = rtrb::RingBuffer::<Note>::new(NOTE_RINGBUFFER_SIZE);
+    let (audio_tx, mut audio_rx) = rtrb::RingBuffer::new(AUDIO_RINGBUFFER_SIZE);
 
-    let player_handle = std::thread::Builder::new()
-        .name("midi-output".into())
-        .spawn({
-            let state = state.clone();
+    let has_vel = velocity_levels > 1;
+    let has_rr = round_robins > 1;
 
-            let midi_ports = midi_output.ports();
-            let midi_out_port = args
-                .midi_port
-                .get(&midi_ports, |p| midi_output.port_name(p))?
-                .ok_or(match args.midi_port {
-                    Matcher::Index(i) => RunError::InvalidPortIndex(i),
-                    Matcher::String(s) => RunError::NoSuchPort(s),
-                })?;
-            let port_name = midi_output.port_name(midi_out_port)?;
-            let mut midi_connection = midi_output
-                .connect(midi_out_port, "autosam")
-                .expect("Failed to connect to selected MIDI port");
+    let entries = std::thread::scope(|scope| {
+        let output_dir = &output_dir;
+        let file_name_prefix = &file_name_prefix;
 
-            info!("Connected to MIDI output port {port_name}");
+        let player_handle = std::thread::Builder::new()
+            .name("midi-output".into())
+            .spawn_scoped(scope, {
+                let state = state.clone();
 
-            midi_connection.send(&channel.all_sound_off())?;
+                let midi_ports = midi_output.ports();
+                let midi_out_port = args
+                    .midi_port
+                    .get(&midi_ports, |p| midi_output.port_name(p))?
+                    .ok_or(match args.midi_port {
+                        Matcher::Index(i) => RunError::InvalidPortIndex(i),
+                        Matcher::String(s) => RunError::NoSuchPort(s),
+                    })?;
+                let port_name = midi_output.port_name(midi_out_port)?;
+                let mut midi_connection = midi_output
+                    .connect(midi_out_port, "autosam")
+                    .expect("Failed to connect to selected MIDI port");
 
-            move || {
-                while {
-                    let is_abandoned = note_rx.is_abandoned();
-                    let sequence_is_done = state.done();
+                info!("Connected to MIDI output port {port_name}");
 
-                    if is_abandoned {
-                        debug!("MIDI producer was dropped");
-                    }
+                midi_connection.send(&channel.all_sound_off())?;
 
-                    if sequence_is_done {
-                        debug!("Audio callback has set `done` flag to `true`");
-                    }
+                move || {
+                    while {
+                        let is_abandoned = note_rx.is_abandoned();
+                        let sequence_is_done = state.done();
 
-                    !is_abandoned && !sequence_is_done
-                } {
-                    let mut any_messages = false;
+                        if is_abandoned {
+                            debug!("MIDI producer was dropped");
+                        }
 
-                    'notes: loop {
-                        match note_rx.pop() {
-                            Err(rtrb::PopError::Empty) => break 'notes,
-                            Ok(note) => {
-                                any_messages = true;
-                                let msg = note.as_midi_message(channel);
-                                debug!("Sending note {msg:?}");
-                                if let Err(e) = midi_connection.send(&msg) {
-                                    error!("Failed to send MIDI note on message: {e}");
+                        if sequence_is_done {
+                            debug!("Audio callback has set `done` flag to `true`");
+                        }
+
+                        !is_abandoned && !sequence_is_done
+                    } {
+                        let mut any_messages = false;
+
+                        'notes: loop {
+                            match note_rx.pop() {
+                                Err(rtrb::PopError::Empty) => break 'notes,
+                                Ok(note) => {
+                                    any_messages = true;
+                                    let msg = note.as_midi_message(channel);
+                                    debug!("Sending note {msg:?}");
+                                    if let Err(e) = midi_connection.send(&msg) {
+                                        error!("Failed to send MIDI note on message: {e}");
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if !any_messages {
-                        std::thread::sleep(Duration::from_millis(1));
+                        if !any_messages {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
                     }
                 }
+            })?;
+
+        let writer_builder = std::thread::Builder::new().name("wav-writer".into());
+
+        let writer_handle = if should_save {
+            let spec = hound::WavSpec {
+                channels: input_config.channels,
+                sample_rate: input_config.sample_rate.0,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+
+            if !output_dir.exists() {
+                std::fs::create_dir_all(output_dir)?;
             }
-        })?;
 
-    let (audio_tx, mut audio_rx) = rtrb::RingBuffer::new(AUDIO_RINGBUFFER_SIZE);
-
-    let writer_builder = std::thread::Builder::new().name("wav-writer".into());
-
-    let writer_handle = if should_save {
-        let spec = hound::WavSpec {
-            channels: input_config.channels,
-            sample_rate: input_config.sample_rate.0,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        let output_dir = args.output_directory.unwrap_or(std::env::current_dir()?);
-        if !output_dir.exists() {
-            std::fs::create_dir_all(&output_dir)?;
-        }
-        let create_file_name = {
             let state = state.clone();
-            let has_vel = velocity_levels > 1;
-            let has_rr = round_robins > 1;
 
-            move || -> anyhow::Result<PathBuf> {
-                let (pitch, velocity, round_robin) = state.note(Ordering::Acquire);
+            writer_builder.spawn_scoped(scope, move || -> anyhow::Result<Vec<_>> {
+                let mut entries = Vec::new();
 
-                let mut file = String::new();
-                if let Some(p) = &args.file_prefix {
-                    file.push_str(p);
-                    file.push('_');
-                }
+                let mut create_file_name = || -> anyhow::Result<PathBuf> {
+                    let (pitch, velocity, round_robin) = state.note(Ordering::Acquire);
 
-                write!(&mut file, "{}", Pitch::new(pitch)?)?;
+                    let entry = util::NamedFile {
+                        prefix: file_name_prefix.as_ref(),
+                        pitch: Pitch::new(pitch)?,
+                        velocity: has_vel.then_some(velocity),
+                        round_robin: has_rr.then_some(round_robin),
+                    };
 
-                if has_vel {
-                    write!(&mut file, "_V{velocity}")?;
-                }
+                    let path = output_dir.join(format!("{entry}"));
+                    entries.push(entry);
 
-                if has_rr {
-                    write!(file, "_RR{}", round_robin + 1)?;
-                }
+                    Ok(path)
+                };
 
-                file.push_str(".wav");
+                let mut writer = hound::WavWriter::create(create_file_name()?, spec)?;
 
-                let mut f = output_dir.clone();
-                f.push(file);
-                Ok(f)
-            }
-        };
-
-        let state = state.clone();
-        let mut writer = hound::WavWriter::create(create_file_name()?, spec)?;
-
-        writer_builder.spawn(move || -> anyhow::Result<()> {
-            // wait for first note event to start writing
-            loop {
-                match audio_rx.pop() {
-                    Err(rtrb::PopError::Empty) if state.done() => {
-                        debug!(
+                // wait for first note event to start writing
+                loop {
+                    match audio_rx.pop() {
+                        Err(rtrb::PopError::Empty) if state.done() => {
+                            debug!(
                             "Audio callback set `done` flag to `true` before any data was recorded"
                         );
-                        return Ok(());
+                            return Ok(entries);
+                        }
+                        Err(rtrb::PopError::Empty) => {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Ok(MaybeSample::Break) => break,
+                        _ => {}
                     }
-                    Err(rtrb::PopError::Empty) => {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    Ok(MaybeSample::Break) => break,
-                    _ => {}
                 }
-            }
 
-            loop {
+                loop {
+                    match audio_rx.pop() {
+                        Err(rtrb::PopError::Empty) if state.done() => {
+                            debug!("I/O thread shutting down");
+                            writer.finalize()?;
+                            return Ok(entries);
+                        }
+                        Err(rtrb::PopError::Empty) => {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Ok(MaybeSample::Break) => {
+                            writer.finalize()?;
+                            debug!("Creating next WAV file");
+                            writer = hound::WavWriter::create(create_file_name()?, spec)?;
+                        }
+                        Ok(MaybeSample::Sample(data)) => {
+                            writer.write_sample(data)?;
+                        }
+                    }
+                }
+            })
+        } else {
+            let state = state.clone();
+
+            writer_builder.spawn_scoped(scope, move || loop {
                 match audio_rx.pop() {
                     Err(rtrb::PopError::Empty) if state.done() => {
                         debug!("I/O thread shutting down");
-                        writer.finalize()?;
-                        return Ok(());
+                        return Ok(Vec::new());
                     }
                     Err(rtrb::PopError::Empty) => {
                         std::thread::sleep(Duration::from_millis(1));
                     }
-                    Ok(MaybeSample::Break) => {
-                        writer.finalize()?;
-                        debug!("Creating next WAV file");
-                        writer = hound::WavWriter::create(create_file_name()?, spec)?;
-                    }
-                    Ok(MaybeSample::Sample(data)) => {
-                        writer.write_sample(data)?;
+                    Ok(MaybeSample::Break) | Ok(MaybeSample::Sample(_)) => {
+                        // do nothing
                     }
                 }
+            })
+        }?;
+
+        let mut processor = runtime::AudioProcessor {
+            seq,
+            sender: note_tx,
+            writer: audio_tx,
+            channels: usize::from(input_config.channels),
+            state: state.clone(),
+            latency_timer: None,
+            trim_start: should_trim,
+        };
+
+        let err_fn = |e| {
+            error!("Encountered an error while processing input audio: {e}");
+        };
+
+        let stream = match supported_input_config.sample_format() {
+            cpal::SampleFormat::I8 => {
+                info!("Incoming sample format is 8 bit signed");
+                input_device.build_input_stream(
+                    &input_config,
+                    move |data, _: &_| processor.write_input_data::<i8>(data),
+                    err_fn,
+                    None,
+                )?
             }
-        })
-    } else {
-        let state = state.clone();
-
-        writer_builder.spawn(move || loop {
-            match audio_rx.pop() {
-                Err(rtrb::PopError::Empty) if state.done() => {
-                    debug!("I/O thread shutting down");
-                    return Ok(());
-                }
-                Err(rtrb::PopError::Empty) => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Ok(MaybeSample::Break) | Ok(MaybeSample::Sample(_)) => {
-                    // do nothing
-                }
+            cpal::SampleFormat::I16 => {
+                info!("Incoming sample format is 16 bit signed");
+                input_device.build_input_stream(
+                    &input_config,
+                    move |data, _: &_| processor.write_input_data::<i16>(data),
+                    err_fn,
+                    None,
+                )?
             }
-        })
-    }?;
+            cpal::SampleFormat::I32 => {
+                info!("Incoming sample format is 32 bit signed");
+                input_device.build_input_stream(
+                    &input_config,
+                    move |data, _: &_| processor.write_input_data::<i32>(data),
+                    err_fn,
+                    None,
+                )?
+            }
+            cpal::SampleFormat::F32 => {
+                info!("Incoming sample format is 32 bit float");
+                input_device.build_input_stream(
+                    &input_config,
+                    move |data, _: &_| processor.write_input_data::<f32>(data),
+                    err_fn,
+                    None,
+                )?
+            }
+            sample_format => {
+                return Err(anyhow::Error::msg(format!(
+                    "Unsupported sample format '{sample_format}'"
+                )))
+            }
+        };
 
-    let mut processor = runtime::AudioProcessor {
-        seq,
-        sender: note_tx,
-        writer: audio_tx,
-        channels: usize::from(input_config.channels),
-        state: state.clone(),
-        latency_timer: None,
-        trim_start: should_trim,
-    };
+        debug!("Capturing input");
 
-    let err_fn = |e| {
-        error!("Encountered an error while processing input audio: {e}");
-    };
+        stream.play()?;
 
-    let stream = match supported_input_config.sample_format() {
-        cpal::SampleFormat::I8 => {
-            info!("Incoming sample format is 8 bit signed");
-            input_device.build_input_stream(
-                &input_config,
-                move |data, _: &_| processor.write_input_data::<i8>(data),
-                err_fn,
-                None,
-            )?
-        }
-        cpal::SampleFormat::I16 => {
-            info!("Incoming sample format is 16 bit signed");
-            input_device.build_input_stream(
-                &input_config,
-                move |data, _: &_| processor.write_input_data::<i16>(data),
-                err_fn,
-                None,
-            )?
-        }
-        cpal::SampleFormat::I32 => {
-            info!("Incoming sample format is 32 bit signed");
-            input_device.build_input_stream(
-                &input_config,
-                move |data, _: &_| processor.write_input_data::<i32>(data),
-                err_fn,
-                None,
-            )?
-        }
-        cpal::SampleFormat::F32 => {
-            info!("Incoming sample format is 32 bit float");
-            input_device.build_input_stream(
-                &input_config,
-                move |data, _: &_| processor.write_input_data::<f32>(data),
-                err_fn,
-                None,
-            )?
-        }
-        sample_format => {
-            return Err(anyhow::Error::msg(format!(
-                "Unsupported sample format '{sample_format}'"
-            )))
-        }
-    };
+        debug!("Waiting for MIDI thread to finish");
 
-    debug!("Capturing input");
+        player_handle
+            .join()
+            .map_err(|e| RunError::MidiPanic(format!("{e:?}")))?;
 
-    stream.play()?;
+        debug!("MIDI player exited, waiting for WAV writer");
 
-    debug!("Waiting for MIDI thread to finish");
+        let entries = writer_handle
+            .join()
+            .map_err(|e| RunError::IoPanic(format!("{e:?}")))??;
 
-    player_handle
-        .join()
-        .map_err(|e| RunError::MidiPanic(format!("{e:?}")))?;
+        debug!("WAV writer exited");
 
-    debug!("MIDI player exited, waiting for WAV writer");
+        drop(stream);
 
-    writer_handle
-        .join()
-        .map_err(|e| RunError::IoPanic(format!("{e:?}")))??;
-
-    debug!("WAV writer exited");
-
-    drop(stream);
+        Ok(entries)
+    })?;
 
     let latency = state.latency();
     let latency_text = format!(
@@ -462,6 +470,92 @@ fn run(args: Args) -> anyhow::Result<()> {
         info!("Recordings complete");
         if latency != 0 {
             info!("{latency_text}");
+        }
+
+        let mut zip_compression = None;
+        let mut zipped_name = output_dir.with_extension("zip");
+
+        match output_format {
+            OutputFormat::Raw => {} // do nothing
+            OutputFormat::Zip => {
+                zip_compression = Some(zip::CompressionMethod::Deflated);
+            }
+            OutputFormat::Bitwig => {
+                zip_compression = Some(zip::CompressionMethod::Stored);
+                zipped_name = output_dir.with_extension("multisample");
+
+                let mut multi = dot_multisample::Multisample::default()
+                    .with_generator("multirec")
+                    .with_samples(entries.iter().enumerate().map(|(idx, f)| {
+                        let note = f.pitch.note_number();
+                        let mut key = dot_multisample::Key::default().with_root(note);
+
+                        if let Some(prev_note) = entries[..idx]
+                            .iter()
+                            .map(|f| f.pitch.note_number())
+                            .rfind(|n| n < &note)
+                        {
+                            let middle = (note - prev_note) / 2 + prev_note;
+                            key = key.with_low(middle);
+                        }
+
+                        if let Some(next_note) = entries[idx..]
+                            .iter()
+                            .map(|f| f.pitch.note_number())
+                            .find(|n| n > &note)
+                        {
+                            let middle =
+                                ((next_note - note) / 2 + note).saturating_sub(1).max(note);
+                            key = key.with_high(middle);
+                        }
+
+                        let vel = f.velocity;
+                        let velocity = entries[idx..]
+                            .iter()
+                            .map(|f| f.velocity)
+                            .find(|v| v < &vel)
+                            .flatten()
+                            .map(|next_vel| {
+                                dot_multisample::ZoneInfo::default()
+                                    .with_high(vel)
+                                    .with_low(next_vel + 1)
+                            });
+
+                        dot_multisample::Sample::default()
+                            .with_file(std::path::PathBuf::from(format!("{f}")))
+                            .with_key(key)
+                            .with_velocity(velocity)
+                            .with_zone_logic(dot_multisample::ZoneLogic::RoundRobin)
+                    }));
+
+                if let Some(p) = &file_name_prefix {
+                    multi = multi.with_name(p);
+                }
+
+                let mut manifest_file = util::Utf8File::xml(output_dir.join("multisample.xml"))?;
+                let mut ser = quick_xml::se::Serializer::new(&mut manifest_file);
+                ser.indent('\t', 1);
+                multi.serialize(ser)?;
+            }
+        }
+
+        if let Some(compression) = zip_compression {
+            let zipped = std::fs::File::create(zipped_name)?;
+            let mut zip_writer = zip::ZipWriter::new(&zipped);
+
+            let opts = zip::write::FileOptions::default().compression_method(compression);
+
+            for file in output_dir.read_dir()? {
+                let file = file?;
+
+                if file.path().is_file() {
+                    zip_writer.start_file(file.file_name().to_string_lossy(), opts)?;
+                    std::io::copy(&mut std::fs::File::open(file.path())?, &mut zip_writer)?;
+                }
+            }
+
+            zip_writer.finish()?;
+            std::fs::remove_dir_all(output_dir)?;
         }
     } else {
         info!("Test complete");

@@ -19,7 +19,11 @@ env_logger = "0.10.0"
 hound = "3.5.0"
 log = "0.4.20"
 midir = "0.9.1"
+quick-xml = { version = "0.30.0", features = ["serialize"] }
 rtrb = "0.2.3"
+serde = { version = "1.0.189" }
 thiserror = "1.0.48"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
 autosam = { path = "../autosam", version = "0.1.0", features = ["std"] }
+dot-multisample = { path = "../dot-multisample" }
