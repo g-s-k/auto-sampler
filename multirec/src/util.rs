@@ -1,3 +1,5 @@
+use std::{fmt::Write, io::Write as _};
+
 use cpal::{
     traits::{DeviceTrait, HostTrait},
     SampleRate,
@@ -52,6 +54,57 @@ impl Matcher {
 pub enum MaybeSample<T> {
     Break,
     Sample(T),
+}
+
+pub struct NamedFile<S> {
+    pub prefix: Option<S>,
+    pub pitch: autosam::midi::Pitch,
+    pub velocity: Option<u8>,
+    pub round_robin: Option<u8>,
+}
+
+impl<S> core::fmt::Display for NamedFile<S>
+where
+    S: AsRef<str>,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(p) = &self.prefix {
+            f.write_str(p.as_ref())?;
+            f.write_char('_')?;
+        }
+
+        write!(f, "{}", self.pitch)?;
+
+        if let Some(velocity) = self.velocity {
+            write!(f, "_V{velocity}")?;
+        }
+
+        if let Some(round_robin) = self.round_robin {
+            write!(f, "_RR{}", round_robin + 1)?;
+        }
+
+        f.write_str(".wav")
+    }
+}
+
+pub struct Utf8File(std::fs::File);
+
+impl Utf8File {
+    pub fn xml(name: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        let mut f = std::fs::File::create(name)?;
+        writeln!(f, r#"<?xml version="1.0" encoding="UTF-8"?>"#)?;
+        Ok(Self(f))
+    }
+}
+
+impl std::fmt::Write for Utf8File {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.write_all(s.as_bytes()).map_err(|_| std::fmt::Error)
+    }
+
+    fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> std::fmt::Result {
+        self.0.write_fmt(args).map_err(|_| std::fmt::Error)
+    }
 }
 
 pub fn print_hosts() -> anyhow::Result<()> {
