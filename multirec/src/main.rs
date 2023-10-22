@@ -1,4 +1,5 @@
 use std::{
+    io::Write as _,
     num::NonZeroU8,
     path::PathBuf,
     sync::{atomic::Ordering, Arc},
@@ -480,6 +481,57 @@ fn run(args: Args) -> anyhow::Result<()> {
             OutputFormat::Zip => {
                 zip_compression = Some(zip::CompressionMethod::Deflated);
             }
+            OutputFormat::Sfz => {
+                let manifest_name = if let Some(p) = &file_name_prefix {
+                    p
+                } else {
+                    "instrument"
+                };
+                let mut f = std::fs::File::create(output_dir.join(format!("{manifest_name}.sfz")))?;
+
+                let mut prev_note = None;
+                let mut prev_velo = None;
+
+                for (idx, file) in entries.iter().enumerate() {
+                    let current_note = file.pitch.note_number();
+                    let note_is_new = Some(current_note) != prev_note;
+                    let velo_is_new = file.velocity != prev_velo;
+
+                    if note_is_new || velo_is_new {
+                        write!(f, "<group> pitch_keycenter={current_note}")?;
+                        prev_note = Some(current_note);
+
+                        if velo_is_new {
+                            if prev_velo > file.velocity {
+                                write!(f, " hivel={}", file.velocity.unwrap())?;
+                            }
+                            prev_velo = file.velocity;
+
+                            if let Some(next_velo) = entries[idx..].iter().find_map(|f| {
+                                (f.pitch == file.pitch && f.velocity < file.velocity)
+                                    .then_some(f.velocity)
+                                    .flatten()
+                            }) {
+                                write!(f, " lowvel={}", next_velo + 1)?;
+                            }
+                        }
+
+                        if has_rr {
+                            write!(f, " seq_length={}", round_robins)?;
+                        }
+
+                        writeln!(f)?;
+                    }
+
+                    write!(f, "<region> sample={file}")?;
+
+                    if let Some(rr) = file.round_robin {
+                        write!(f, " seq_position={}", rr + 1)?;
+                    }
+
+                    writeln!(f)?;
+                }
+            }
             OutputFormat::Bitwig => {
                 zip_compression = Some(zip::CompressionMethod::Stored);
                 zipped_name = output_dir.with_extension("multisample");
@@ -509,17 +561,19 @@ fn run(args: Args) -> anyhow::Result<()> {
                             key = key.with_high(middle);
                         }
 
-                        let vel = f.velocity;
-                        let velocity = entries[idx..]
-                            .iter()
-                            .map(|f| f.velocity)
-                            .find(|v| v < &vel)
-                            .flatten()
-                            .map(|next_vel| {
-                                dot_multisample::ZoneInfo::default()
-                                    .with_high(vel)
-                                    .with_low(next_vel + 1)
-                            });
+                        let velocity = f.velocity.map(|v| {
+                            let mut vel = dot_multisample::ZoneInfo::default().with_high(v);
+
+                            if let Some(next_vel) = entries[idx..].iter().find_map(|e| {
+                                (e.pitch == f.pitch && e.velocity < f.velocity)
+                                    .then_some(e.velocity)
+                                    .flatten()
+                            }) {
+                                vel = vel.with_low(next_vel + 1);
+                            }
+
+                            vel
+                        });
 
                         dot_multisample::Sample::default()
                             .with_file(std::path::PathBuf::from(format!("{f}")))

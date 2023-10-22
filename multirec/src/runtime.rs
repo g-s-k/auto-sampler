@@ -22,7 +22,7 @@ pub struct RunState {
 impl RunState {
     pub fn new(initial_pitch: u8) -> Self {
         Self {
-            note_data: AtomicU32::new(u32::from_be_bytes([0, initial_pitch, 127, 0])),
+            note_data: AtomicU32::new(u32::from_be_bytes([1, initial_pitch, 127, 0])),
             done: AtomicBool::new(false),
             latency: AtomicUsize::new(0),
         }
@@ -42,7 +42,8 @@ impl RunState {
     }
 
     pub fn new_note(&self, note: &Note) {
-        let (old_pitch, old_velocity, old_robin) = self.note(Ordering::Relaxed);
+        let [first, old_pitch, old_velocity, old_robin] =
+            self.note_data.load(Ordering::Relaxed).to_be_bytes();
 
         let pitch = note.pitch().note_number();
         let velocity = note.velocity();
@@ -52,7 +53,7 @@ impl RunState {
                 0,
                 pitch,
                 velocity,
-                if old_pitch == pitch && old_velocity == velocity {
+                if first == 0 && old_pitch == pitch && old_velocity == velocity {
                     old_robin + 1
                 } else {
                     0

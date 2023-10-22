@@ -105,5 +105,6 @@ pub struct Timing {
 pub enum OutputFormat {
     Raw,
     Zip,
+    Sfz,
     Bitwig,
 }

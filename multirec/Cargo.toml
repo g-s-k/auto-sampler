@@ -26,4 +26,4 @@ thiserror = "1.0.48"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
 autosam = { path = "../autosam", version = "0.1.0", features = ["std"] }
-dot-multisample = { path = "../dot-multisample" }
+dot-multisample = { path = "../dot-multisample", version = "0.1.0" }
